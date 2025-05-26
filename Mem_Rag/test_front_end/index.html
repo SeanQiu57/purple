@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <title>九重Memory 调试</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 1rem;
+        }
+
+        section {
+            margin-bottom: 2rem;
+        }
+
+        textarea,
+        input[type="text"] {
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        pre {
+            background: #f5f5f5;
+            padding: .5rem;
+            overflow-x: auto;
+        }
+
+        button {
+            margin-top: .5rem;
+            padding: .5rem 1rem;
+        }
+
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>九重Memory 调试界面</h1>
+
+    <!-- 查询记忆 -->
+    <section>
+        <h2>🔍 查询记忆</h2>
+        <label>输入查询文本：</label><br>
+        <input type="text" id="q-input" placeholder="例如：你好，记忆如何？"><br>
+        <button id="q-btn">查询</button>
+        <pre id="q-out"></pre>
+    </section>
+
+    <!-- 批量导入 & 清空 -->
+    <section>
+        <h2>📥 批量导入 / 📤 清空长期记忆</h2>
+        <label>每行一段要导入的文本：</label><br>
+        <textarea id="imp-texts" rows="6" placeholder="第一段文本\n第二段文本\n…"></textarea><br>
+        <button id="imp-btn">导入</button>
+        <button id="del-btn" style="margin-left:1rem; background:#e74c3c; color:white;">清空长期记忆</button>
+        <pre id="imp-out"></pre>
+    </section>
+
+    <script>
+        // 统一展示结果
+        function showResult(elem, status, body, isError = false) {
+            elem.textContent = `HTTP ${status}\n\n` + body;
+            elem.classList.toggle("error", isError);
+        }
+
+        // 查询
+        document.getElementById("q-btn").onclick = async () => {
+            const out = document.getElementById("q-out");
+            out.textContent = "";
+            const q = document.getElementById("q-input").value.trim();
+            if (!q) return alert("请输入查询内容！");
+            try {
+                const resp = await fetch("/memory/query", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ q })
+                });
+                const txt = await resp.text();
+                if (!resp.ok) {
+                    showResult(out, resp.status, txt, true);
+                } else {
+                    const js = JSON.parse(txt);
+                    showResult(out, resp.status, JSON.stringify(js, null, 2));
+                }
+            } catch (e) {
+                showResult(out, "-", e.toString(), true);
+            }
+        };
+
+        // 批量导入
+        document.getElementById("imp-btn").onclick = async () => {
+            const out = document.getElementById("imp-out");
+            out.textContent = "";
+            const texts = document.getElementById("imp-texts").value
+                .split("\n").map(s => s.trim()).filter(s => s);
+            if (texts.length === 0) return alert("请先输入至少一段文本！");
+            try {
+                const resp = await fetch("/memory/import", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ texts })
+                });
+                const txt = await resp.text();
+                if (!resp.ok) {
+                    showResult(out, resp.status, txt, true);
+                } else {
+                    const js = JSON.parse(txt);
+                    showResult(out, resp.status, JSON.stringify(js, null, 2));
+                }
+            } catch (e) {
+                showResult(out, "-", e.toString(), true);
+            }
+        };
+
+        // 清空长期记忆
+        document.getElementById("del-btn").onclick = async () => {
+            const out = document.getElementById("imp-out");
+            out.textContent = "";
+            if (!confirm("确定要清空所有长期记忆向量吗？此操作不可恢复！")) return;
+            try {
+                const resp = await fetch("/memory/clear", {
+                    method: "DELETE"
+                });
+                const txt = await resp.text();
+                if (!resp.ok) {
+                    showResult(out, resp.status, txt, true);
+                } else {
+                    const js = JSON.parse(txt);
+                    showResult(out, resp.status, JSON.stringify(js, null, 2));
+                }
+            } catch (e) {
+                showResult(out, "-", e.toString(), true);
+            }
+        };
+    </script>
+</body>
+
+</html>
