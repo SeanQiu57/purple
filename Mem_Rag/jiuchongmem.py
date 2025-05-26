@@ -1,74 +1,44 @@
-# 稳定查询存储500字一chunk版本111
+# 主函数，负责主要的记忆逻辑，如果不依赖小智模块；
+# 里面有的逻辑可以移到函数封装脚本里面，配置火山等也可以移动到另外的脚本
 import os
+import re
 import asyncio
 import traceback
 from datetime import datetime
-from typing import List, Sequence, Optional
+from typing import List, Sequence
 from urllib.parse import quote_plus
-from sqlalchemy import create_engine, select, func, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import (
+    create_engine, select, func, text, String, exc as sa_exc
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
-from sqlalchemy import String
 from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
 from volcenginesdkarkruntime import Ark
-from openai import OpenAI
-from ..base import MemoryProviderBase, logger
-from pgvector.psycopg2 import register_vector
-import logging
+from ..base import MemoryProviderBase, logger          # ↖ 你的框架基类
+from .lc_mem_store import (                            # ☆ 仅这一行 import
+    init_store, add_text, similarity_search
+)
 import threading
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from fastapi.staticfiles import StaticFiles
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import re
-from .lc_mem_store import init_store, add_text, similarity_search, clear_all
-# Constant tag for logging
+
 TAG = "[JiuchongMem]"
 
-# def search_long_memory(session: Session, role_id: str, emb: List[float], top_k: int = 3):
-#     """
-#     emb: 已经通过 self.embed_text(...) 得到的向量
-#     返回 [(score, content, meta), ...]
-#     """
-#     sql = text("""
-#     SELECT
-#         embedding <-> (:emb)::vector AS score,
-#         content
-#     FROM memory_vec
-#     WHERE user_id = :uid
-#     ORDER BY score
-#     LIMIT :k
-#     """)
-#     rows = session.execute(sql, {"emb": emb, "uid": str(role_id), "k": top_k}).fetchall()
-
-#     if not rows:
-#         logger.bind(tag=TAG).info("[LongMemory] no hits found")
-#     else:
-#         for idx, (score, content) in enumerate(rows, 1):
-#             snippet = content.replace("\n", " ")[:200]
-#             logger.bind(tag=TAG).info(
-#                 f"[LongMemory] hit#{idx:02d} score={score:.4f} content='{snippet}…'"
-#             )
-#     return rows
-
-# --------------------------------------
-#  SQLAlchemy models
-# --------------------------------------
+# ────────────────────────  SQLAlchemy Base ────────────────────────
 
 
 class Base(DeclarativeBase):
-    pass
+    ...
 
 
 class MemoryDoc(Base):
     __tablename__ = "memory_doc"
     id:        Mapped[int] = mapped_column(primary_key=True)
     user_id:   Mapped[str] = mapped_column(String)
-    mem_type:  Mapped[str] = mapped_column(String)  # short / working
+    mem_type:  Mapped[str] = mapped_column(String)     # short / working
     content:   Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+# （可选）MemoryVec 仍保留；如果已全部用 pgvector 可直接删掉
 
 
 class MemoryVec(Base):
@@ -81,243 +51,110 @@ class MemoryVec(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
-# --------------------------------------
-#  Hard‑coded DB creds → engine
-# --------------------------------------
-DB_USER = "postgres"
-DB_PASSWORD = "sean"
-DB_HOST = "127.0.0.1"
-DB_PORT = "5432"
-DB_NAME = "azi_db"
-DB_URL = f"postgresql+psycopg2://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# ────────────────────────  常量配置 ────────────────────────
+DB_URL = (
+    "postgresql+psycopg2://postgres:"
+    f"{quote_plus('sean')}@127.0.0.1:5432/azi_db"
+)
 
-# --------------------------------------
-#  Provider
-# --------------------------------------
+# ────────────────────────  Provider 核心 ────────────────────────
 
 
 class MemoryProvider(MemoryProviderBase):
     provider_name = "jiuchongmem"
+    _debug_api_started = False
 
-    def embed_text(self, text: str) -> List[float]:
-        """
-        用火山 Ark SDK 调用 embedding 模型，将单条文本转成向量。
-        """
-        try:
-            # Ark embedding 接口，input 接受 list
-            resp = self.ark_client.embeddings.create(
-                model=str(self.EmbeddingID),
-                input=[text]
+    @classmethod
+    def _ensure_debug_api(cls):
+        if cls._debug_api_started:
+            return
+        from .jiuchongmem_debug_api import app as _debug_app
+
+        def _run():
+            uvicorn.run(
+                _debug_app,
+                host="0.0.0.0",
+                port=8081,
+                log_level="debug",
+                access_log=False
             )
-            # 返回首条结果的 embedding 向量
-            return resp.data[0].embedding
-        except Exception as e:
-            logger.bind(tag=TAG).error(f"Embedding failed: {e}")
-            # 容错返回全 0 向量
-            return [0.0] * 2560
 
-    def __init__(self, config: dict, summary_memory: str | None = None):
+        t = threading.Thread(
+            target=_run,
+            daemon=True,
+            name="JiuchongMemDebugAPI"
+        )
+        t.start()
+        cls._debug_api_started = True
+
+    def __init__(
+        self,
+        config: dict,
+        summary_memory: str | None = None
+    ):
         super().__init__(config)
         self.SHORT_KEEP = int(config.get("short_keep", 20))
-        self.LONG_BATCH = int(config.get("long_batch", 10))   # 每次弹出多少条
+        self.LONG_BATCH = int(config.get("long_batch", 10))
         self.EmbeddingID = config.get("embedding_model_id", 10)
-        self.SECTION_SIZE = 1                 # 拆成两段存向量
-        logger.info(f"[JiuchongMem] 使用的 role_id = {self.role_id!r}")
-        # db
-        try:
-            self.engine = create_engine(DB_URL, pool_pre_ping=True)
-            with self.engine.connect() as c:
-                c.execute(text("SELECT 1"))
-        except OperationalError as e:
-            logger.error(f"DB connect failed: {e}")
-            raise
+        self.SECTION_SIZE = 1
+        self._summary = summary_memory or ""
+
+        # 本地 DB：短/工作记忆
+        self.engine = create_engine(DB_URL, pool_pre_ping=True)
         Base.metadata.create_all(self.engine)
+
+        # Ark 客户端
         ark_key = config.get("ARK_API_KEY")
         model_id = config.get("MODEL_ENDPOINT")
         if not ark_key or not model_id:
             raise RuntimeError("ARK_API_KEY / MODEL_ENDPOINT 缺失")
         self.ark_client = Ark(api_key=ark_key)
         self.ARK_MODEL_ID = model_id
-        # state
-        self._turn = 0
-        self._summary = summary_memory or ""
 
-        # ------------------------ 初始化（框架在建立 WS/HTTP 连接时调用） ------------------------
+        # 自动启动 Debug API 服务
+        self._ensure_debug_api()
+
     def init_memory(self, role_id, llm, **kwargs):
         super().init_memory(role_id, llm, **kwargs)
-
-        if not self.role_id:
-            raise RuntimeError("init_memory 未收到有效 role_id！")
-
-        logger.info("[JiuchongMem] init_memory ⏩ 开始 init_store")
-        try:
-            init_store(
-                pg_url=DB_URL,
-                ark_client=self.ark_client,
-                ark_model_id=self.EmbeddingID,
-                chunk_size=500,
-                role_id=self.role_id
-            )
-            logger.info("[JiuchongMem] init_store ✅ 成功返回")
-        except Exception as e:
-            logger.error(
-                f"[JiuchongMem] init_store 出错, 跳过后续逻辑: {e}", exc_info=True)
-            # 如果你希望哪怕失败也继续后面的调试服务，就不要在这儿 re-raise
-        # 再启动调试 API
-        try:
-            logger.info("[JiuchongMem] _start_debug_api ⏩ 调用中…")
-            self._start_debug_api()
-            logger.info("[JiuchongMem] _start_debug_api ✅ 成功")
-        except Exception as e:
-            logger.error(f"[JiuchongMem] 启动调试 API 失败: {e}", exc_info=True)
-
-        logger.info(f"[JiuchongMem] init_memory 完成，role_id={self.role_id}")
-
-    def _clean_text(self, t: str) -> str:
-        t = re.sub(r"-\s*\n\s*", "", t)              # 连字符断行
-        t = re.sub(r"[•■▪︎●\u2022]+", " ", t)        # bullet
-        t = re.sub(r"\bPage \d+ of \d+\b", " ", t, flags=re.I)
-        t = re.sub(r"[\r\n\t]+", " ", t)             # 换行→空格
-        t = re.sub(r"\s{2,}", " ", t)                # 压缩空格
-        return t.strip()
-
-    def _start_debug_api(self):
-        """内联启动一个 FastAPI+uvicorn 服务，用来做内存调试"""
-        app = FastAPI(
-            title="九重Memory 调试",
-            description="长短期记忆手动查询 / 批量导入",
-            version="1.0.0",
+        init_store(
+            pg_url=DB_URL,
+            ark_client=self.ark_client,
+            ark_model_id=self.EmbeddingID,
+            chunk_size=500,
+            role_id=self.role_id,
         )
-        static_dir = os.path.join(
-            os.path.dirname(__file__),  # core/providers/memory/jiuchongmem
-            "static"
-        )
-        app.mount(
-            "/debug-ui",
-            StaticFiles(directory=static_dir, html=True),
-            name="debug-ui",
-        )
-        # 查询接口，直接返回 hits
+        logger.info(f"{TAG} init_store ✅ role_id={self.role_id}")
 
-        class QueryRequest(BaseModel):
-            q: str
-
-        @app.post("/memory/query")
-        async def debug_query(req: QueryRequest):
-            # # 1. 生成向量
-            # emb = self.embed_text(req.q)
-            # # 2. 检索 top_k（用你原来的 search_long_memory）
-            # with Session(self.engine) as s:
-            #     rows = search_long_memory(s, self.role_id, emb, top_k=5)
-            # # 3. 组装成列表
-            # hits = [{"score": float(r[0]), "content": r[1]} for r in rows]
-            docs = similarity_search(req.q, k=5)
-            hits = [{"content": d.page_content} for d in docs]
-            return {"query": req.q, "hits": hits}
-
-        # 批量导入接口：支持 text 或 texts，500 字符一段
-
-        class ImportRequest(BaseModel):
-            text:  Optional[str] = None
-            texts: Optional[List[str]] = None
-
-        @app.post("/memory/import")
-        async def debug_import(req: ImportRequest):
-            # 1) 合并所有输入为一个大块文本
-            if req.text:
-                full_text = req.text
-            elif req.texts:
-                # 用换行符串联多段
-                full_text = "\n".join(req.texts)
-            else:
-                raise HTTPException(
-                    status_code=422,
-                    detail="请提供 text 或 texts 之一"
-                )
-            logger.debug(">>> 合并后待切分文本长度：%d", len(full_text))
-            logger.debug(">>> 文本预览：%r", full_text[:200])
-            # 2) 只传这一整段给 add_text
-            added = add_text(full_text)
-            return {"total_segments": added}
-            # # 1) 清洗 + 按 500 字符拆分
-            # segments = []
-            # for raw in all_texts:
-            #     clean = self._clean_text(raw)
-            #     for i in range(0, len(clean), 500):
-            #         seg = clean[i:i+500]
-            #         if len(seg) < 60:     # 太短就丢弃
-            #             continue
-            #         segments.append(seg)
-
-            # 2) SECTION_SIZE = 1，每段 500 字直接写向量
-            # with Session(self.engine) as s:
-            #     for idx, seg in enumerate(segments):
-            #         emb = self.embed_text(seg)
-            #         s.add(MemoryVec(
-            #             user_id=str(self.role_id),
-            #             embedding=emb,
-            #             content=seg,
-            #             meta={"seg": idx, "src": "import"}
-            #         ))
-            #     s.commit()
-
-            # return {
-            #     "total_segments": len(segments)
-            # }
-        @app.delete("/memory/clear")
-        async def clear_memory():
-            deleted = clear_all(DB_URL, str(self.role_id))
-            return {"deleted_count": deleted}
-
-        # 启动服务
-        def run_uvicorn():
-            uvicorn.run(app, host="0.0.0.0", port=8081, log_level="debug")
-
-        t = threading.Thread(target=run_uvicorn, daemon=True)
-        t.start()
-        logger.info(f"{TAG} 调试 API 已启动 → http://<host>:8081/")
-
-    async def _batch_import(self, texts: list[str]) -> int:
-        """示例：把每段 text 分成 500 字，插入长期记忆库"""
-        count = 0
-        for text in texts:
-            for i in range(0, len(text), 500):
-                segment = text[i: i + 500]
-                await self.save_memory(segment)
-                count += 1
-        return count
-    # ------------------------ 查询 ------------------------
-
+    # ---------- query_memory ----------
     async def query_memory(self, query: str) -> str:
+        """拼 prompt：短记忆 + 工作记忆 + 长记忆(similarity_search)"""
         with Session(self.engine) as s:
             shorts = s.scalars(
                 select(MemoryDoc.content)
-                .where(MemoryDoc.user_id == str(self.role_id), MemoryDoc.mem_type == 'short')
+                .where(MemoryDoc.user_id == str(self.role_id),
+                       MemoryDoc.mem_type == 'short')
                 .order_by(MemoryDoc.id.desc())
                 .limit(self.SHORT_KEEP)
             ).all()
             working = s.scalars(
                 select(MemoryDoc.content)
-                .where(MemoryDoc.user_id == str(self.role_id), MemoryDoc.mem_type == 'working')
+                .where(MemoryDoc.user_id == str(self.role_id),
+                       MemoryDoc.mem_type == 'working')
                 .order_by(MemoryDoc.id.desc())
             ).first()
-            # 1) 用 Ark SDK 或者 self.embed_text 生成 query 向量
-            emb = self.embed_text(query)
-            # 2) 从 memory_vec 表里检索 top 3
-            # long_hits =
-            long_hits = ""
-            # 3) 把命中内容拼进 prompt
-            long_memory = "\n".join(f"- {hit[1]}" for hit in long_hits)
-        # logger.info(f"[Memory] query_memory turn={self._turn} query={query} shorts={shorts} working={working}")
-        # Construct a comprehensive memory prompt
-        short_memory = "\n".join(shorts[::-1])  # Newest first
-        memory_prompt = f"下面是输入：这是短期记忆-你和主人近期聊天记录\n{short_memory}\n\n"
-        memory_prompt += f"### 工作记忆-你的性格，遐想和脑子里近期回荡的事情\n{working}\n\n"
-        memory_prompt += f"### 当前主人说的话\n{query}"
-        memory_prompt += f"\n\n### 长期记忆-以往的记忆碎片\n{long_memory}\n\n"
-        logger.info(
-            f"[Memory] Constructed memory prompt with {len(shorts)} short items")
-        return memory_prompt
+
+        # ☆ 长期记忆检索
+        long_docs = similarity_search(query, k=3)
+        long_memory = "\n".join(f"- {d.page_content}" for d in long_docs)
+
+        short_memory = "\n".join(shorts[::-1])
+        prompt = (
+            f"【短期记忆】\n{short_memory}\n\n"
+            f"【工作记忆】\n{working}\n\n"
+            f"【当前输入】\n{query}\n\n"
+            f"【长期记忆】\n{long_memory}\n"
+        )
+        return prompt
 
     # ------------------------ 写入 ------------------------
     async def save_memory(self, msgs: Sequence):

@@ -12,6 +12,7 @@ CREATE TABLE memory_doc (
   created_at  TIMESTAMPTZ DEFAULT now()
 );
 5：长期记忆的向量数据库不需要自己建，langchain会自动建表，而且这样列名不容易错更方便
+6：设置好自己用户的独特ID，需要在储存记忆的时候传到数据库里面，查询都是按id查询
 
 附录：SQL常用命令
 

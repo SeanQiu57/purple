@@ -40,6 +40,13 @@
 <body>
     <h1>九重Memory 调试界面</h1>
 
+    <!-- 用户 ID 输入 -->
+    <section>
+        <h2>👤 用户 ID</h2>
+        <label for="user-id">请输入用户唯一 ID：</label><br>
+        <input type="text" id="user-id" placeholder="例如：user1234"><br>
+    </section>
+
     <!-- 查询记忆 -->
     <section>
         <h2>🔍 查询记忆</h2>
@@ -60,6 +67,16 @@
     </section>
 
     <script>
+        // 获取用户 ID
+        function getUserId() {
+            const uid = document.getElementById("user-id").value.trim();
+            if (!uid) {
+                alert("请先输入用户唯一 ID！");
+                throw new Error("Missing user_id");
+            }
+            return uid;
+        }
+
         // 统一展示结果
         function showResult(elem, status, body, isError = false) {
             elem.textContent = `HTTP ${status}\n\n` + body;
@@ -68,72 +85,54 @@
 
         // 查询
         document.getElementById("q-btn").onclick = async () => {
-            const out = document.getElementById("q-out");
-            out.textContent = "";
-            const q = document.getElementById("q-input").value.trim();
+            const out = document.getElementById("q-out"); out.textContent = "";
+            let q = document.getElementById("q-input").value.trim();
             if (!q) return alert("请输入查询内容！");
+            let uid;
+            try { uid = getUserId(); } catch { return; }
             try {
-                const resp = await fetch("/memory/query", {
+                const resp = await fetch(`/memory/query`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ q })
+                    body: JSON.stringify({ user_id: uid, q })
                 });
                 const txt = await resp.text();
-                if (!resp.ok) {
-                    showResult(out, resp.status, txt, true);
-                } else {
-                    const js = JSON.parse(txt);
-                    showResult(out, resp.status, JSON.stringify(js, null, 2));
-                }
-            } catch (e) {
-                showResult(out, "-", e.toString(), true);
-            }
+                if (!resp.ok) showResult(out, resp.status, txt, true);
+                else showResult(out, resp.status, JSON.stringify(JSON.parse(txt), null, 2));
+            } catch (e) { showResult(out, "-", e.toString(), true); }
         };
 
         // 批量导入
         document.getElementById("imp-btn").onclick = async () => {
-            const out = document.getElementById("imp-out");
-            out.textContent = "";
-            const texts = document.getElementById("imp-texts").value
-                .split("\n").map(s => s.trim()).filter(s => s);
+            const out = document.getElementById("imp-out"); out.textContent = "";
+            const texts = document.getElementById("imp-texts").value.split("\n").map(s => s.trim()).filter(s => s);
             if (texts.length === 0) return alert("请先输入至少一段文本！");
+            let uid;
+            try { uid = getUserId(); } catch { return; }
             try {
-                const resp = await fetch("/memory/import", {
+                const resp = await fetch(`/memory/import`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ texts })
+                    body: JSON.stringify({ user_id: uid, texts })
                 });
                 const txt = await resp.text();
-                if (!resp.ok) {
-                    showResult(out, resp.status, txt, true);
-                } else {
-                    const js = JSON.parse(txt);
-                    showResult(out, resp.status, JSON.stringify(js, null, 2));
-                }
-            } catch (e) {
-                showResult(out, "-", e.toString(), true);
-            }
+                if (!resp.ok) showResult(out, resp.status, txt, true);
+                else showResult(out, resp.status, JSON.stringify(JSON.parse(txt), null, 2));
+            } catch (e) { showResult(out, "-", e.toString(), true); }
         };
 
-        // 清空长期记忆
+        // 清空
         document.getElementById("del-btn").onclick = async () => {
-            const out = document.getElementById("imp-out");
-            out.textContent = "";
-            if (!confirm("确定要清空所有长期记忆向量吗？此操作不可恢复！")) return;
+            const out = document.getElementById("imp-out"); out.textContent = "";
+            if (!confirm("确定要清空长期记忆？不可恢复！")) return;
+            let uid;
+            try { uid = getUserId(); } catch { return; }
             try {
-                const resp = await fetch("/memory/clear", {
-                    method: "DELETE"
-                });
+                const resp = await fetch(`/memory/clear?user_id=${uid}`, { method: "DELETE" });
                 const txt = await resp.text();
-                if (!resp.ok) {
-                    showResult(out, resp.status, txt, true);
-                } else {
-                    const js = JSON.parse(txt);
-                    showResult(out, resp.status, JSON.stringify(js, null, 2));
-                }
-            } catch (e) {
-                showResult(out, "-", e.toString(), true);
-            }
+                if (!resp.ok) showResult(out, resp.status, txt, true);
+                else showResult(out, resp.status, JSON.stringify(JSON.parse(txt), null, 2));
+            } catch (e) { showResult(out, "-", e.toString(), true); }
         };
     </script>
 </body>
