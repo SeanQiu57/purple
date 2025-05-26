@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket 麦克风测试 (16 kHz)</title>
+</head>
+
+<body>
+    <button id="recordBtn">开始录音（麦克风）</button>
+
+    <script>
+        // 指定 WebSocket 服务端地址
+        const WS_URL = "ws://115.190.106.113:5001/vad_asr";
+        console.log('WS_URL =', WS_URL);
+
+        let ws, recording = false, audioCtx, sourceNode, processor, stream;
+        const CHUNK = 512;       // 16 kHz 时 ≈32 ms
+
+        document.getElementById('recordBtn').onclick = async () => {
+            if (!recording) {
+                // 建立 WebSocket 连接
+                ws = new WebSocket(WS_URL);
+                ws.binaryType = 'arraybuffer';
+                ws.onopen = () => console.log('✅ WS 握手成功');
+                ws.onerror = e => console.error('❌ WS 错误', e);
+                ws.onclose = () => console.log('⚠️ WS 已关闭');
+                ws.onmessage = m => console.log('📩 ASR:', m.data);
+
+                // 使用麦克风输入（请求 16 kHz / 16-bit / 单声道）
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        sampleSize: 16,
+                        channelCount: 1
+                    },
+                    video: false
+                });
+
+                // 创建 16 kHz AudioContext
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                console.log('🎛️ AudioContext sampleRate =', audioCtx.sampleRate);
+
+                sourceNode = audioCtx.createMediaStreamSource(stream);
+                processor = audioCtx.createScriptProcessor(CHUNK, 1, 1);
+
+                processor.onaudioprocess = e => {
+                    const f = e.inputBuffer.getChannelData(0);
+                    const out = new Int16Array(f.length);
+                    for (let i = 0; i < f.length; i++) {
+                        let s = Math.max(-1, Math.min(1, f[i]));
+                        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(out.buffer);
+                    }
+                };
+
+                sourceNode.connect(processor);
+                processor.connect(audioCtx.destination);
+
+                recording = true;
+                recordBtn.textContent = '停止录音（麦克风）';
+            } else {
+                // 停止录音并关闭连接
+                processor.disconnect();
+                sourceNode.disconnect();
+                stream.getTracks().forEach(t => t.stop());
+                ws.close();
+                recording = false;
+                recordBtn.textContent = '开始录音（麦克风）';
+            }
+        };
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,25 @@
+# 主框架依赖
+camel-ai[tools]==0.2.59
+
+# Camel 依赖的额外库
+pyyaml
+requests-oauthlib
+
+# 环境变量加载
+python-dotenv
+
+# WebSocket 客户端（测试脚本用）
+websocket-client
+
+# Gevent + WebSocket 服务
+gevent
+gevent-websocket
+
+# ASR VAD 模型推理
+onnxruntime
+
+# 数值计算
+numpy
+
+# HTTP 调用 Dify
+requests
