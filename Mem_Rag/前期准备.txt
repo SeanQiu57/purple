@@ -1,0 +1,123 @@
+1：火山平台准备好embedding模型，然后记录下你embedding模型的endpoint和apikey（在线推理那里开通模型并设置）
+2：用langchain包装火山模型
+3：下载本地postgre数据库，并下载pgvector插件（！！命令行安装的时候名字就叫vector，很坑）
+4：建短期记忆表和工作记忆表
+--sql
+CREATE TABLE memory_doc (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL,
+  mem_type    VARCHAR(12) NOT NULL 
+                CHECK (mem_type IN ('working','short')),
+  content     TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+5：长期记忆的向量数据库不需要自己建，langchain会自动建表，而且这样列名不容易错更方便
+
+附录：SQL常用命令
+
+-- 连接数据库（在 shell 里执行）
+psql "postgresql://postgres:sean@127.0.0.1:5432/azi_db"
+
+-- 统计所有短期记忆条数
+SELECT COUNT(*) AS total_records FROM memory_doc;
+
+-- 统计指定用户的记忆条数
+SELECT COUNT(*) AS user_records
+FROM memory_doc
+WHERE user_id = 'CE:6F:9B:F2:BA:88';
+
+-- 按用户分组统计条数
+SELECT user_id, COUNT(*) AS cnt
+FROM memory_doc
+GROUP BY user_id
+ORDER BY cnt DESC;
+
+-- 统计短期记忆条数
+SELECT COUNT(*) AS short_count
+FROM memory_doc
+WHERE mem_type = 'short';
+
+-- 统计工作记忆条数
+SELECT COUNT(*) AS working_count
+FROM memory_doc
+WHERE mem_type = 'working';
+
+-- 查看最新 10 条短期记忆
+SELECT id, user_id, created_at, content
+FROM memory_doc
+WHERE mem_type = 'short'
+ORDER BY id DESC
+LIMIT 10;
+
+-- 查看指定用户最新 5 条工作记忆
+SELECT id, created_at, content
+FROM memory_doc
+WHERE user_id = 'CE:6F:9B:F2:BA:88'
+  AND mem_type = 'working'
+ORDER BY id DESC
+LIMIT 5;
+
+-- 查看指定用户全部对话记录（按时间顺序）
+SELECT id, mem_type, created_at, content
+FROM memory_doc
+WHERE user_id = 'CE:6F:9B:F2:BA:88'
+ORDER BY created_at;
+
+-- 导出短期记忆为 CSV
+\COPY (SELECT * FROM memory_doc WHERE mem_type = 'short')
+TO '/tmp/short_mem.csv' CSV HEADER;
+
+-- 取消分页（让结果一次性输出）
+\pset pager off
+
+-- 如果被分页器卡住，在 (END) 时按 q 即可退出分页
+-- 退出 psql
+\q
+
+-- 查看向量表总记录数
+SELECT COUNT(*) AS vec_total FROM memory_vec;
+
+-- 查看某用户的向量条数
+SELECT COUNT(*) AS vec_user
+FROM memory_vec
+WHERE user_id = 'CE:6F:9B:F2:BA:88';
+
+-- 查看最新 5 条向量及其维度和部分内容
+SELECT id, created_at,
+       array_length(embedding,1) AS dim,
+       substring(embedding::text,1,100) AS sample_embedding
+FROM memory_vec
+WHERE user_id = 'CE:6F:9B:F2:BA:88'
+ORDER BY id DESC
+LIMIT 5;
+
+-- 导出向量表为 CSV
+\COPY (SELECT id, user_id, embedding FROM memory_vec)
+TO '/tmp/memory_vec.csv' CSV HEADER;
+
+-- 删除操作
+DELETE FROM memory_doc
+WHERE mem_type = 'working'
+  AND id NOT IN (
+    SELECT max(id)
+    FROM memory_doc
+    WHERE mem_type = 'working'
+    GROUP BY user_id
+);
+
+--删除表
+DROP TABLE IF EXISTS memory_vec CASCADE;
+--查看例子
+SELECT
+  collection_id,
+  substr(document,1,80)   AS doc_snippet,   -- 只看前 80 字
+  cmetadata::text         AS raw_metadata,
+  custom_id,
+  uuid
+FROM langchain_pg_embedding
+ORDER BY uuid DESC
+LIMIT 5;
+
+
+
+
