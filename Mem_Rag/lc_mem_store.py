@@ -1,10 +1,17 @@
-# 封装向量数据库查询，chunking和存储的函数
+"""
+lc_mem_store.py
+封装 PGVector + ArkEmbedding 的最小实现，提供 4 个外部可用函数：
+    ▸ init_store(pg_url, ark_client, ark_model_id, chunk_size, role_id)
+    ▸ add_text(text: str) -> int
+    ▸ similarity_search(query: str, k: int = 5)
+    ▸ clear_all(pg_url: str, role_id: str) -> int
+"""
 
 from __future__ import annotations
 import logging
 import re
-from typing import List
-
+from typing import List, Tuple, Any
+import time
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 from langchain.docstore.document import Document
@@ -12,6 +19,7 @@ from langchain.embeddings.base import Embeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores.pgvector import PGVector
 from volcenginesdkarkruntime import Ark
+from volcenginesdkarkruntime._exceptions import ArkRateLimitError
 
 # ───────────────────────────── Logger
 _logger = logging.getLogger("lc_mem")
@@ -46,75 +54,101 @@ class ArkEmbedding(Embeddings):
 # ───────────────────────────── 初始化
 
 
-def init_store(*, pg_url: str, ark_client: Ark, ark_model_id: str, chunk_size: int, role_id: str):
-    """
-    幂等：第二次调用直接返回已创建的 PGVector。
-    """
-    global _vs, _splitter, _ROLE
-    if _vs and _splitter:
-        return _vs
-
-    _ROLE = str(role_id)
-
-    # 1) 保证 pgvector 扩展 / 表存在
-    engine = create_engine(pg_url)
-    with engine.begin() as conn:
-        conn.execute(text('CREATE EXTENSION IF NOT EXISTS "vector";'))
-        if hasattr(PGVector, "initialize"):
+class MemoryStore:
+    def __init__(
+        self,
+        pg_url: str,
+        ark_client: Ark,
+        ark_model_id: str,
+        chunk_size: int,
+        role_id: str,
+    ):
+        engine = create_engine(pg_url)
+        with engine.begin() as conn:
+            conn.execute(text('CREATE EXTENSION IF NOT EXISTS "vector";'))
             try:
-                PGVector.initialize(pg_url, collection_name=TABLE)
-            except ProgrammingError as e:
-                if "already exists" not in str(e):
+                PGVector.initialize(pg_url, collection_name="jiuchongmemory")
+            except Exception:
+                pass
+
+        self.role_id = str(role_id)
+        self.embedder = ArkEmbedding(ark_client, ark_model_id)
+        self.vs = PGVector(
+            connection_string=pg_url,
+            collection_name="jiuchongmemory",
+            embedding_function=self.embedder,
+        )
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size, chunk_overlap=0
+        )
+        _logger.info("MemoryStore 初始化完毕，role_id=%s", self.role_id)
+
+    # ────────────────── 工具函数 ──────────────────
+    def _clean(self, text: str) -> str:
+        text = re.sub(r"\r\n|\r", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        return text.strip()
+
+    def _retry_backoff(self, fn, *args, retries=5, base_delay=1, **kwargs):
+        for attempt in range(1, retries + 1):
+            try:
+                return fn(*args, **kwargs)
+            except ArkRateLimitError:
+                if attempt == retries:
                     raise
+                delay = base_delay * (2 ** (attempt - 1))
+                _logger.warning(
+                    "ArkRateLimitError, retry #%d in %.1fs…", attempt, delay
+                )
+                time.sleep(delay)
 
-    # 2) 构造 PGVector
-    embedder = ArkEmbedding(ark_client, ark_model_id)
-    _vs = PGVector(connection_string=pg_url,
-                   collection_name=TABLE,
-                   embedding_function=embedder)
-    _splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=0)
+    # ────────────────── 外部 API ──────────────────
+    def add_text(self, text: str, batch_size: int = 156) -> int:
+        raw = self._clean(text)
+        docs = [
+            Document(page_content=seg, metadata={"user_id": self.role_id})
+            for seg in self.splitter.split_text(raw)
+            if len(seg) >= 60
+        ]
 
-    _logger.info("PGVector ready  collection=%s  role=%s", TABLE, _ROLE)
-    return _vs
+        total = 0
+        for i in range(0, len(docs), batch_size):
+            batch = docs[i: i + batch_size]
+            if not batch:
+                continue
+            _logger.info("写入第 %d 批，共 %d 段", i // batch_size + 1, len(batch))
+            self._retry_backoff(self.vs.add_documents, batch)
+            total += len(batch)
+        return total
 
-# ───────────────────────────── 内部工具
+    def similarity_search(self, query: str, k: int):
+        return self.vs.max_marginal_relevance_search_with_score(
+            query,
+            k=k,
+            fetch_k=30,
+            lambda_mult=0.6,
+            filter={"user_id": self.role_id},
+        )
 
+    def similarity_search_by_name(self, query: str, role_id: str, k: int):
+        return self.vs.max_marginal_relevance_search_with_score(
+            query,
+            k=k,
+            fetch_k=30,
+            lambda_mult=0.6,
+            filter={"user_id": str(role_id)},
+        )
 
-def _clean(text: str) -> str:
-    text = re.sub(r"\r\n|\r", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
-
-# ───────────────────────────── 外部 API
-
-
-def add_text(text: str) -> int:
-    if not (_vs and _splitter):
-        raise RuntimeError("lc_mem_store.init_store() 尚未调用")
-    docs: list[Document] = []
-    for seg in _splitter.split_text(_clean(text)):
-        if len(seg) < 60:
-            continue
-        docs.append(Document(page_content=seg, metadata={"user_id": _ROLE}))
-    if docs:
-        _vs.add_documents(docs)
-    _logger.debug("add_text() → %d segments", len(docs))
-    return len(docs)
-
-
-def similarity_search(query: str, *, k: int = 5):
-    if not _vs:
-        raise RuntimeError("lc_mem_store.init_store() 尚未调用")
-    return _vs.similarity_search(query, k=k, filter={"user_id": _ROLE})
-
-
-def clear_all(pg_url: str, role_id: str) -> int:
-    engine = create_engine(pg_url)
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-            DELETE FROM langchain_pg_embedding
-            WHERE cmetadata->>'user_id' = :uid
-        """), {"uid": role_id})
-    return res.rowcount
+    @staticmethod
+    def clear_all(pg_url: str, role_id: str) -> int:
+        engine = create_engine(pg_url)
+        with engine.begin() as conn:
+            res = conn.execute(
+                text(
+                    "DELETE FROM langchain_pg_embedding "
+                    "WHERE cmetadata->>'user_id' = :uid"
+                ),
+                {"uid": role_id},
+            )
+        return res.rowcount
