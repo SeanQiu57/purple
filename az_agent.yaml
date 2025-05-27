@@ -1,0 +1,32 @@
+# ─── az_agent.yaml ───
+memorymanager:
+  # 文件 & 阈值
+  short_memory_file: "voicememory.txt"
+  episodic_memory_file: "Episodicmemory.txt"
+  max_memory_items: 30          # 原 MAX_MEMORY
+  episodic_summary_trigger: 15  # 原 SUMMARY_COUNT
+  # 调用 Dify 做记忆摘要
+  dify_summary_url: "https://api.dify.ai/v1/chat-messages"
+  dify_summary_api_key: "${DIFY_API_KEY}"
+  summary_timeout: 10           # 秒
+llm_client:
+  dify_chat_url: "https://api.dify.ai/v1/chat-messages"
+  api_key: "${DIFY_API_KEY}"
+  request_timeout: 10           # 秒 (sync)
+  stream_timeout: 40            # 秒 (SSE)
+senddoubao:
+  ws_url:  "wss://openspeech.bytedance.com/api/v2/asr"
+  app_id:  "${DOUBAO_APP_ID}"
+  token:   "${DOUBAO_TOKEN}"
+  sample_rate: 16000
+  chunk_ms:   200
+  compress:   true
+  compress_block_size: 4096
+camelfunc:
+  # 桌宠工具用到的资源路径
+  playmusic_dir: "./music"
+  screenshot_dir: "./screenshots"
+  poems_file: "./poems.txt"
+  # CAMEL / LLM 细节（如需）
+  model: "gpt-3.5-turbo"
+  tool_temperature: 0.2
