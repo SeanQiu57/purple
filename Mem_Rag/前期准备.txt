@@ -1,6 +1,6 @@
 1：火山平台准备好embedding模型，然后记录下你embedding模型的endpoint和apikey（在线推理那里开通模型并设置）
 2：用langchain包装火山模型
-3：下载本地postgre数据库，并下载pgvector插件（！！命令行安装的时候名字就叫vector，很坑）
+3：下载本地postgre数据库，并下载pgvector插件（！！命令行安装的时候名字就叫vector，很坑），也可以用其他的支持向量的数据库
 4：建短期记忆表和工作记忆表
 --sql
 CREATE TABLE memory_doc (
