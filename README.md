@@ -1,3 +1,7 @@
+阿紫是一个AI虚拟桌宠项目，目前正在进行中，以及有了成熟的模块，需要进一步的整理和封装
+
+
+各模块介绍：
 //emotion_controller.py	作为独立线程运行：1. 从主线程收到 (prompt, ws) 队列项；2. 调用 Dify 生成“Face%@% … / Act%@% …”情绪标记；3. 解析出 faces、acts 并补齐长度、做范围校验；4. 通过 WebSocket 向前端发送 {"label":"emotion","faces":[…],"acts":[…]}。	使用 queue.Queue 做线程安全排队，任何异常时回退到默认表情/动作。
 
 //func_client.py	演示脚本：用 SSE 流式接口调用 Dify，并捕捉 OpenAI-style function-calling。若 1 秒内流数据中出现 agent_thought.tool_input 就返回 {"label":"function", …}，否则返回 {"label":"none"}。	定义了单个函数规格 playmusic 并设置 timeout_sec = 2.0。
